@@ -1,0 +1,10 @@
+
+{
+  "requestFramePermissions": [
+    "microphone",
+    "camera"
+  ],
+  "name": "Ajo_AI_Technologies",
+  "description": "",
+  "prompt": ""
+}
