@@ -1,12 +1,13 @@
 
-import React, { useState, useCallback, useRef, useEffect } from 'react';
+import React, { useState, useCallback, useRef, useEffect, useReducer } from 'react';
 import FileUpload from './components/FileUpload';
 import TranscriptionView from './components/TranscriptionView';
 import OcrResultView from './components/OcrResultView';
 import Loader from './components/Loader';
 import { polishText, translateText, sendMessage, extractTextFromDocument } from './services/geminiService';
 import * as authService from './services/authService';
-import type { AppScreen, FileObject, ProcessingOptions, Transcript, OcrResult, Tool, TableResult, PptResult, User, StoredFile, ChatMessage, SubscriptionTier, CustomChatbot, ChatContext, BackendStatus } from './types';
+import * as pdfTools from './services/pdfToolsService';
+import type { AppScreen, FileObject, ProcessingOptions, Tool, User, StoredFile, ChatMessage, SubscriptionTier, CustomChatbot, ChatContext } from './types';
 import { AppScreen as AppScreenEnum, TranscriptionMode } from './types';
 import PdfToolsSelection from './components/PdfToolsSelection';
 import TableResultView from './components/TableResultView';
@@ -23,10 +24,12 @@ import PaymentView from './components/PaymentView';
 import ChatbotBuilderView from './components/ChatbotBuilderView';
 import AboutModal from './components/AboutModal';
 import UpgradePendingView from './components/UpgradePendingView';
-import LiveTranslateView from './components/LiveTranslateView';
 import { AjoAiLogo } from './components/Logo';
 import ProfileView from './components/ProfileView';
 import BackendOfflineView from './components/BackendOfflineView';
+import { appReducer, initialState } from './state';
+import LiveRecordingView from './components/LiveRecordingView';
+
 
 const UserMenu: React.FC<{ user: User; onLogout: () => void; onNavigateProfile: () => void; }> = ({ user, onLogout, onNavigateProfile }) => {
     const [isOpen, setIsOpen] = useState(false);
@@ -72,215 +75,237 @@ const UserMenu: React.FC<{ user: User; onLogout: () => void; onNavigateProfile: 
     );
 };
 
+const getApiEndpointForTool = (tool: Tool): string => {
+    const endpointMap: Partial<Record<Tool, string>> = {
+        SCRIBE: 'transcribe',
+        LIVE_SCRIBE: 'transcribe', // Live Scribe uses the same backend endpoint
+        OCR: 'ocr',
+        PDF_TO_WORD: 'pdf_to_word',
+        PDF_TO_EXCEL: 'tables',
+        PDF_TO_PPT: 'ppt',
+    };
+    const endpoint = endpointMap[tool];
+    if (!endpoint) {
+        throw new Error(`No API endpoint defined for tool: ${tool}`);
+    }
+    return endpoint;
+};
+
 
 const App: React.FC = () => {
-    const [currentUser, setCurrentUser] = useState<User | null>(null);
-    const [screen, setScreen] = useState<AppScreen>(AppScreenEnum.CHECKING_BACKEND);
-    const [backendStatus, setBackendStatus] = useState<BackendStatus>('checking');
-    const [activeTool, setActiveTool] = useState<Tool | null>(null);
-    const [isProcessing, setIsProcessing] = useState(false);
-    const [loadingMessage, setLoadingMessage] = useState('');
-    
-    const [currentFile, setCurrentFile] = useState<StoredFile | null>(null);
-    const [error, setError] = useState<string | null>(null);
+    const [state, dispatch] = useReducer(appReducer, initialState);
+    const { currentUser, screen, backendStatus, activeTool, isProcessing, loadingMessage, currentFile, error } = state;
+
+    // Local state for UI components that don't affect core app logic
     const [isAboutModalOpen, setIsAboutModalOpen] = useState(false);
     const [planToPurchase, setPlanToPurchase] = useState<SubscriptionTier | null>(null);
 
-
-    // Chat State
+    // Chat State (kept separate as it's a self-contained feature)
     const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
     const [chatContext, setChatContext] = useState<ChatContext | null>(null);
     
-    // Recording State
-    const [isRecording, setIsRecording] = useState(false);
-    const [elapsedTime, setElapsedTime] = useState(0);
-    const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-    const audioChunksRef = useRef<Blob[]>([]);
-    const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-    // Session Tracking
-    const loginTimestamp = useRef<number | null>(null);
-    
     // --- App Initialization & Auth ---
     useEffect(() => {
-        const checkBackendStatus = async () => {
-            try {
-                const response = await fetch('/api/status');
-                if (response.ok) {
-                    setBackendStatus('online');
-                    const user = authService.getCurrentUser();
-                    if (user) {
-                        handleLogin(user); // Use handleLogin to set timestamp
-                    } else {
-                        setScreen(AppScreenEnum.LOGIN);
+        const checkBackendStatusWithRetry = async (maxRetries = 5, delay = 5000) => {
+            for (let attempt = 1; attempt <= maxRetries; attempt++) {
+                try {
+                    const response = await fetch('/api/status');
+                    if (response.ok) {
+                        const user = authService.getCurrentUser();
+                        dispatch({ 
+                            type: 'SET_BACKEND_STATUS', 
+                            payload: { status: 'online', screen: user ? (user.subscriptionRequest ? AppScreenEnum.UPGRADE_PENDING_VIEW : AppScreenEnum.DASHBOARD) : AppScreenEnum.LOGIN, user }
+                        });
+                        return; // Success, exit function
                     }
-                } else {
-                    throw new Error('Backend offline');
+                    console.warn(`Backend check attempt ${attempt} returned status: ${response.status}`);
+                } catch (error) {
+                    console.warn(`Backend check attempt ${attempt} failed with network error:`, error);
                 }
-            } catch (error) {
-                setBackendStatus('offline');
-                setScreen(AppScreenEnum.BACKEND_OFFLINE);
+
+                if (attempt < maxRetries) {
+                    await new Promise(res => setTimeout(res, delay));
+                }
             }
+
+            // If all retries fail, set status to offline
+            console.error("Backend is offline after multiple attempts.");
+            dispatch({ type: 'SET_BACKEND_STATUS', payload: { status: 'offline', screen: AppScreenEnum.BACKEND_OFFLINE } });
         };
 
-        checkBackendStatus();
-
-        return () => {
-            if (timerRef.current) clearInterval(timerRef.current);
-            if (mediaRecorderRef.current && mediaRecorderRef.current.stream) {
-                 mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
-            }
-        };
+        checkBackendStatusWithRetry();
     }, []);
 
     const handleLogin = (user: User) => {
-        setCurrentUser(user);
-        setScreen(AppScreenEnum.DASHBOARD);
-        loginTimestamp.current = Date.now();
-        if (user.subscriptionRequest) {
-            setScreen(AppScreenEnum.UPGRADE_PENDING_VIEW);
-        }
+        dispatch({ type: 'LOGIN_SUCCESS', payload: user });
     };
 
     const handleLogout = () => {
-        if (loginTimestamp.current && currentUser) {
-            const durationMinutes = Math.round((Date.now() - loginTimestamp.current) / 60000);
-            if (durationMinutes > 0) {
-                // This is now handled by backend, but could be useful for frontend analytics
-            }
-            loginTimestamp.current = null;
-        }
         authService.logout();
-        setCurrentUser(null);
-        setScreen(AppScreenEnum.LOGIN);
+        dispatch({ type: 'LOGOUT' });
     };
 
     const handleUserUpdate = (user: User) => {
-        setCurrentUser(user);
+        dispatch({ type: 'USER_UPDATED', payload: user });
     };
     
-    const checkAccess = async (tool: Tool): Promise<boolean> => {
-        // Backend now handles all access control and credit deduction.
-        // This function remains as a placeholder for potential future simple frontend checks.
-        return true;
-    };
-
-
     // --- Navigation and Tool Selection ---
-    const handleNavigateToPricing = () => setScreen(AppScreenEnum.PRICING_VIEW);
-    const handleNavigateToProfile = () => setScreen(AppScreenEnum.PROFILE_VIEW);
-    const handleBackToDashboard = () => setScreen(AppScreenEnum.DASHBOARD);
+    const handleNavigateToPricing = () => dispatch({ type: 'NAVIGATE', payload: { screen: AppScreenEnum.PRICING_VIEW } });
+    const handleNavigateToProfile = () => dispatch({ type: 'NAVIGATE', payload: { screen: AppScreenEnum.PROFILE_VIEW } });
+    const handleBackToDashboard = () => dispatch({ type: 'RESET_VIEW' });
 
     const handleToolSelect = (toolOrGroup: Tool | 'PDF_TOOLS_GROUP') => {
-        setError(null);
-        if (toolOrGroup === 'PDF_TOOLS_GROUP') {
-            setScreen(AppScreenEnum.PDF_TOOL_SELECTION);
-        } else if (toolOrGroup === 'LIVE_TRANSLATE') {
-            setActiveTool(toolOrGroup);
-            setScreen(AppScreenEnum.LIVE_TRANSLATE_VIEW);
-        } else if (toolOrGroup === 'AI_CHAT') {
+        const screenMap: Record<Tool | 'PDF_TOOLS_GROUP', AppScreen> = {
+            PDF_TOOLS_GROUP: AppScreenEnum.PDF_TOOL_SELECTION,
+            AI_CHAT: AppScreenEnum.CHAT_VIEW,
+            AI_CHATBOT_BUILDER: AppScreenEnum.CHATBOT_BUILDER_VIEW,
+            SCRIBE: AppScreenEnum.UPLOAD,
+            LIVE_SCRIBE: AppScreenEnum.LIVE_RECORDING,
+            OCR: AppScreenEnum.UPLOAD,
+            IMAGES_TO_PDF: AppScreenEnum.UPLOAD,
+            MERGE_PDF: AppScreenEnum.UPLOAD,
+            SPLIT_PDF: AppScreenEnum.UPLOAD,
+            COMPRESS_PDF: AppScreenEnum.UPLOAD,
+            PDF_TO_WORD: AppScreenEnum.UPLOAD,
+            PDF_TO_EXCEL: AppScreenEnum.UPLOAD,
+            PDF_TO_PPT: AppScreenEnum.UPLOAD,
+            PDF_TO_IMAGE: AppScreenEnum.UPLOAD,
+            SCAN_TO_PDF: AppScreenEnum.UPLOAD,
+            KNOWLEDGE_DOCUMENT: AppScreenEnum.UPLOAD,
+            AI_POLISH: AppScreenEnum.UPLOAD,
+            AI_TRANSLATE: AppScreenEnum.UPLOAD,
+        };
+        const targetScreen = screenMap[toolOrGroup];
+
+        if (toolOrGroup === 'AI_CHAT') {
             handleStartChatSession();
-        } else if (toolOrGroup === 'AI_CHATBOT_BUILDER') {
-            setActiveTool(toolOrGroup);
-            setScreen(AppScreenEnum.CHATBOT_BUILDER_VIEW);
         } else {
-            setActiveTool(toolOrGroup);
-            setScreen(AppScreenEnum.UPLOAD);
+            dispatch({ type: 'NAVIGATE', payload: { screen: targetScreen, tool: toolOrGroup !== 'PDF_TOOLS_GROUP' ? toolOrGroup : null } });
         }
     };
-
+    
     const handlePdfToolSelect = (tool: Tool) => {
-        setActiveTool(tool);
-        if (tool === 'SCAN_TO_PDF') {
-            setScreen(AppScreenEnum.SCAN_VIEW);
-        } else {
-            setScreen(AppScreenEnum.UPLOAD);
-        }
-        setError(null);
+        const screen = tool === 'SCAN_TO_PDF' ? AppScreenEnum.SCAN_VIEW : AppScreenEnum.UPLOAD;
+        dispatch({ type: 'NAVIGATE', payload: { screen, tool } });
     }
     
-    // --- Main Processing Logic ---
     const handleProcessFiles = useCallback(async (files: FileObject[], options: ProcessingOptions, tool: Tool | null) => {
         if (files.length === 0 || !tool || !currentUser) return;
-        
-        setIsProcessing(true);
-        setError(null);
-        
-        const fileToProcess = files[0];
-        
+    
+        dispatch({ type: 'START_PROCESSING', payload: { message: `Processing ${files[0].file.name}...`, tool } });
+    
         try {
+            const clientSideTools: Tool[] = ['IMAGES_TO_PDF', 'MERGE_PDF', 'SPLIT_PDF', 'COMPRESS_PDF', 'PDF_TO_IMAGE'];
+            
+            if (clientSideTools.includes(tool)) {
+                const fileList = files.map(f => f.file);
+                const baseFileName = fileList[0].name.replace(/\.[^/.]+$/, "");
+                let resultBlob: Blob | null = null;
+                let downloadFilename = "download.zip";
+    
+                switch (tool) {
+                    case 'IMAGES_TO_PDF':
+                        resultBlob = await pdfTools.convertImagesToPdf(fileList);
+                        downloadFilename = `${baseFileName || 'converted'}.pdf`;
+                        break;
+                    case 'MERGE_PDF':
+                        resultBlob = await pdfTools.mergePdfs(fileList);
+                        downloadFilename = `merged_document.pdf`;
+                        break;
+                    case 'SPLIT_PDF':
+                        resultBlob = await pdfTools.splitPdf(fileList[0], options.pageRange || '1');
+                        downloadFilename = `${baseFileName}_split.pdf`;
+                        break;
+                    case 'COMPRESS_PDF':
+                        resultBlob = await pdfTools.compressPdf(fileList[0]);
+                        downloadFilename = `${baseFileName}_compressed.pdf`;
+                        break;
+                    case 'PDF_TO_IMAGE':
+                        resultBlob = await pdfTools.convertPdfToImages(fileList[0]);
+                        downloadFilename = `${baseFileName}_images.zip`;
+                        break;
+                }
+    
+                if (resultBlob) {
+                    downloadFile(resultBlob, downloadFilename);
+                    dispatch({ type: 'DOWNLOAD_COMPLETE' });
+                } else {
+                    throw new Error("Client-side processing failed to produce a file.");
+                }
+                return;
+            }
+    
+            const endpoint = getApiEndpointForTool(tool);
+            const fileToProcess = files[0];
             const formData = new FormData();
             files.forEach(f => formData.append('file', f.file));
             formData.append('options', JSON.stringify(options));
             formData.append('fileName', fileToProcess.file.name);
-
-            setLoadingMessage(`Processing ${fileToProcess.file.name}...`);
-            
-            const response = await fetch(`/api/ai/${tool.toLowerCase()}`, {
+    
+            const response = await fetch(`/api/ai/${endpoint}`, {
                 method: 'POST',
                 headers: { 'x-auth-token': authService.getToken() || '' },
                 body: formData,
             });
-
+    
             if (!response.ok) {
-                 const data = await response.json();
+                const data = await response.json();
                 throw new Error(data.msg || 'An error occurred during processing.');
             }
-
-            // If the response is a blob for download
+    
             const contentType = response.headers.get('Content-Type');
             if (contentType && !contentType.includes('application/json')) {
-                 const blob = await response.blob();
-                 const contentDisposition = response.headers.get('Content-Disposition');
-                 let downloadFilename = `processed_${fileToProcess.file.name}`;
-                 if(contentDisposition) {
+                const blob = await response.blob();
+                const contentDisposition = response.headers.get('Content-Disposition');
+                let downloadFilename = `processed_${fileToProcess.file.name}`;
+                if (contentDisposition) {
                     const filenameMatch = contentDisposition.match(/filename="(.+)"/);
                     if (filenameMatch && filenameMatch.length > 1) {
                         downloadFilename = filenameMatch[1];
                     }
-                 }
-                 downloadFile(blob, downloadFilename);
-                 handleBackToDashboard();
-                 return;
+                }
+                downloadFile(blob, downloadFilename);
+                dispatch({ type: 'DOWNLOAD_COMPLETE' });
+                return;
             }
-
-            // If it's JSON data
+    
             const data = await response.json();
             const savedFile = await authService.saveFile({ fileName: fileToProcess.file.name, tool, result: data });
-            setCurrentFile(savedFile);
-            
+    
             const refreshedUser = await authService.refreshUser();
-            if (refreshedUser) setCurrentUser(refreshedUser);
-
+            if (!refreshedUser) throw new Error("Could not refresh user session.");
+    
             const screenMap: Partial<Record<Tool, AppScreen>> = {
                 SCRIBE: AppScreenEnum.TRANSCRIPTION,
+                LIVE_SCRIBE: AppScreenEnum.TRANSCRIPTION,
                 OCR: AppScreenEnum.OCR_RESULT,
                 PDF_TO_WORD: AppScreenEnum.OCR_RESULT,
                 PDF_TO_EXCEL: AppScreenEnum.TABLE_RESULT,
                 PDF_TO_PPT: AppScreenEnum.PPT_RESULT,
             };
-            setScreen(screenMap[tool] || AppScreenEnum.DASHBOARD);
-            
+    
+            dispatch({
+                type: 'PROCESSING_SUCCESS',
+                payload: {
+                    file: savedFile,
+                    screen: screenMap[tool] || AppScreenEnum.DASHBOARD,
+                    user: refreshedUser
+                }
+            });
+    
         } catch (e: any) {
-             setError(e.message || `An unknown error occurred during ${tool} processing.`);
-             setActiveTool(tool);
-             setScreen(AppScreenEnum.UPLOAD);
-        } finally {
-            setIsProcessing(false);
-            setLoadingMessage('');
+            dispatch({ type: 'PROCESSING_FAILED', payload: e.message || `An unknown error occurred during ${tool} processing.` });
         }
-    }, [currentUser]);
-
-
-    // --- AI Sub-Actions (Polish, Translate) ---
+    }, [currentUser, dispatch]);
+    
     const handlePolish = async (text: string): Promise<string | null> => {
         try {
             const polishedResult = await polishText(text);
             const user = await authService.refreshUser();
-            if (user) setCurrentUser(user);
+            if (user) handleUserUpdate(user);
             return polishedResult;
         } catch (e: any) {
-            setError(e.message || "Failed to polish text.");
+             dispatch({ type: 'PROCESSING_FAILED', payload: e.message || "Failed to polish text." });
             return null;
         }
     };
@@ -289,15 +314,14 @@ const App: React.FC = () => {
         try {
             const translatedResult = await translateText(text, language);
             const user = await authService.refreshUser();
-            if (user) setCurrentUser(user);
+            if (user) handleUserUpdate(user);
             return translatedResult;
         } catch (e: any) {
-            setError(e.message || "Failed to translate text.");
+            dispatch({ type: 'PROCESSING_FAILED', payload: e.message || "Failed to translate text." });
             return null;
         }
     };
 
-    // --- Specific Tool Handlers (Chat, etc.) ---
     const handleSendMessage = async (message: string, file?: File) => {
         if (!currentUser || (!message.trim() && !file)) return;
 
@@ -315,7 +339,7 @@ const App: React.FC = () => {
                     systemInstruction = chatContext.persona;
                  } else {
                     const resultText = JSON.stringify(chatContext.result);
-                    systemInstruction = `You are an expert on the following document. Your role is to answer questions based ONLY on the provided text. Do not make up information. Document content:\n\n---\n${resultText}\n---`;
+                    systemInstruction = `You are an expert on the following document. Your role is to to answer questions based ONLY on the provided text. Do not make up information. Document content:\n\n---\n${resultText}\n---`;
                  }
             }
             
@@ -331,7 +355,7 @@ const App: React.FC = () => {
                 return updatedHistory;
             });
             const user = await authService.refreshUser();
-            if (user) setCurrentUser(user);
+            if (user) handleUserUpdate(user);
 
         } catch (e: any) {
             console.error("Chat send error:", e);
@@ -351,15 +375,13 @@ const App: React.FC = () => {
     const handleStartChatSession = (context?: StoredFile | CustomChatbot) => {
         setChatContext(context || null);
         setChatHistory([]);
-        setScreen(AppScreenEnum.CHAT_VIEW);
+        dispatch({ type: 'NAVIGATE', payload: { screen: AppScreenEnum.CHAT_VIEW } });
     };
 
     const handleSaveChatbot = async (name: string, persona: string, files: File[]) => {
         if (!currentUser) return;
         
-        setIsProcessing(true);
-        setLoadingMessage('Creating chatbot and processing knowledge files...');
-        setError(null);
+        dispatch({ type: 'START_PROCESSING', payload: { message: 'Creating chatbot and processing knowledge files...', tool: 'AI_CHATBOT_BUILDER' } });
         try {
             const knowledgeFileIds: string[] = [];
             for (const file of files) {
@@ -373,21 +395,15 @@ const App: React.FC = () => {
             }
             
             await authService.saveChatbot({ name, persona, knowledgeBaseFileIds: knowledgeFileIds });
-
             const user = await authService.refreshUser();
-            if (user) setCurrentUser(user);
-            setScreen(AppScreenEnum.DASHBOARD);
+            if (user) handleUserUpdate(user);
+            dispatch({ type: 'RESET_VIEW' });
         } catch (e: any) {
-             setError(e.message || "Failed to create chatbot.");
-             setScreen(AppScreenEnum.CHATBOT_BUILDER_VIEW);
-        } finally {
-             setIsProcessing(false);
-             setLoadingMessage('');
+             dispatch({ type: 'PROCESSING_FAILED', payload: e.message || "Failed to create chatbot." });
         }
     };
 
     const handleOpenFile = (file: StoredFile) => {
-        setCurrentFile(file);
         const screenMap: Partial<Record<Tool, AppScreen>> = {
             SCRIBE: AppScreenEnum.TRANSCRIPTION,
             OCR: AppScreenEnum.OCR_RESULT,
@@ -397,65 +413,14 @@ const App: React.FC = () => {
         };
         const targetScreen = screenMap[file.tool];
         if (targetScreen) {
-            setScreen(targetScreen);
-        }
-    };
-
-    // --- Recording ---
-    const startRecording = async () => {
-        try {
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            mediaRecorderRef.current = new MediaRecorder(stream);
-            audioChunksRef.current = [];
-            
-            mediaRecorderRef.current.ondataavailable = (event) => {
-                audioChunksRef.current.push(event.data);
-            };
-
-            mediaRecorderRef.current.onstop = () => {
-                const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-                const audioFile = new File([audioBlob], `recording_${new Date().toISOString()}.webm`, { type: 'audio/webm' });
-                const fileObject: FileObject = { id: audioFile.name, file: audioFile };
-                
-                 handleProcessFiles([fileObject], {
-                    language: 'English',
-                    mode: TranscriptionMode.DOLPHIN,
-                    enableSpeakerRecognition: true,
-                    enableAudioRestoration: false,
-                }, 'SCRIBE');
-
-                stream.getTracks().forEach(track => track.stop());
-            };
-
-            mediaRecorderRef.current.start();
-            setIsProcessing(true); // Show loader immediately
-            setLoadingMessage("Recording... Click stop when finished.");
-            setIsRecording(true);
-            setElapsedTime(0);
-            timerRef.current = setInterval(() => {
-                setElapsedTime(prev => prev + 1);
-            }, 1000);
-
-        } catch (error) {
-            console.error("Error starting recording:", error);
-            setError("Could not start recording. Please ensure microphone access is granted.");
-        }
-    };
-
-    const stopRecording = () => {
-        if (mediaRecorderRef.current) {
-            mediaRecorderRef.current.stop();
-            setIsRecording(false);
-            setLoadingMessage("Finalizing recording..."); // Update loader message
-            if (timerRef.current) clearInterval(timerRef.current);
+            dispatch({ type: 'SET_CURRENT_FILE', payload: { file, screen: targetScreen } });
         }
     };
     
-    // --- Subscription ---
     const handleSelectPlan = (tier: SubscriptionTier) => {
         if(tier === 'Free' || !currentUser) return;
         setPlanToPurchase(tier);
-        setScreen(AppScreenEnum.PAYMENT_VIEW);
+        dispatch({ type: 'NAVIGATE', payload: { screen: AppScreenEnum.PAYMENT_VIEW } });
     };
 
     const handlePaymentComplete = async () => {
@@ -463,16 +428,19 @@ const App: React.FC = () => {
         try {
             await authService.requestSubscriptionUpgrade(planToPurchase);
             const refreshedUser = await authService.refreshUser();
-            if (refreshedUser) setCurrentUser(refreshedUser);
-            setScreen(AppScreenEnum.UPGRADE_PENDING_VIEW);
+            if (refreshedUser) handleUserUpdate(refreshedUser);
+            dispatch({ type: 'NAVIGATE', payload: { screen: AppScreenEnum.UPGRADE_PENDING_VIEW } });
         } catch(e: any) {
             console.error("Failed to request upgrade:", e.message);
-            setError("Could not submit your upgrade request. Please try again.");
-            setScreen(AppScreenEnum.PAYMENT_VIEW);
+            alert("Could not submit your upgrade request. Please try again.");
         }
     };
 
-    // --- Render Logic ---
+    const handleErrorDismiss = () => {
+        dispatch({ type: 'CLEAR_ERROR' });
+    };
+
+
     const renderScreen = () => {
         if (isProcessing) {
             return <Loader message={loadingMessage} />;
@@ -487,11 +455,9 @@ const App: React.FC = () => {
                     onSelectTool={handleToolSelect}
                     onOpenFile={handleOpenFile}
                     onStartChat={handleStartChatSession}
-                    startRecording={startRecording}
-                    stopRecording={stopRecording}
-                    isRecording={isRecording}
-                    elapsedTime={elapsedTime}
                     onUpgradePlan={handleNavigateToPricing}
+                    error={error}
+                    onErrorDismiss={handleErrorDismiss}
                 /> : <LoginScreen onLogin={handleLogin} />;
             case AppScreenEnum.PDF_TOOL_SELECTION:
                 return <PdfToolsSelection onSelectTool={handlePdfToolSelect} onBack={handleBackToDashboard} />;
@@ -501,6 +467,23 @@ const App: React.FC = () => {
                     isProcessing={isProcessing} 
                     tool={activeTool} 
                     onBack={handleBackToDashboard} 
+                    error={error}
+                />;
+            case AppScreenEnum.LIVE_RECORDING:
+                return <LiveRecordingView
+                    onBack={handleBackToDashboard}
+                    onComplete={(file) => {
+                        handleProcessFiles(
+                            [{ id: file.name, file: file }], 
+                            { 
+                                language: 'English', 
+                                mode: TranscriptionMode.DOLPHIN, 
+                                enableSpeakerRecognition: true, 
+                                enableAudioRestoration: false,
+                            }, 
+                            'LIVE_SCRIBE'
+                        );
+                    }}
                 />;
             case AppScreenEnum.TRANSCRIPTION:
                 return currentFile && 'segments' in currentFile.result ? <TranscriptionView 
@@ -531,7 +514,7 @@ const App: React.FC = () => {
                 /> : <p>Error: Invalid data for presentation view.</p>;
             case AppScreenEnum.SCAN_VIEW:
                 return <ScanView 
-                    onBack={() => setScreen(AppScreenEnum.PDF_TOOL_SELECTION)} 
+                    onBack={() => dispatch({ type: 'NAVIGATE', payload: { screen: AppScreenEnum.PDF_TOOL_SELECTION } })} 
                     onComplete={(files) => {
                         handleProcessFiles(files.map(f => ({id: f.name, file: f})), {} as ProcessingOptions, 'IMAGES_TO_PDF');
                     }} 
@@ -548,46 +531,56 @@ const App: React.FC = () => {
                  return <PricingView onSelectPlan={handleSelectPlan} onBack={handleBackToDashboard} />;
             case AppScreenEnum.PAYMENT_VIEW:
                  const planDetails = planToPurchase ? PLANS[planToPurchase] : null;
-                 return <PaymentView onPaymentComplete={handlePaymentComplete} onBack={() => setScreen(AppScreenEnum.PRICING_VIEW)} plan={planDetails} />;
+                 return <PaymentView onPaymentComplete={handlePaymentComplete} onBack={() => dispatch({ type: 'NAVIGATE', payload: { screen: AppScreenEnum.PRICING_VIEW } })} plan={planDetails} />;
              case AppScreenEnum.UPGRADE_PENDING_VIEW:
                  return <UpgradePendingView onBack={handleBackToDashboard} />;
-             case AppScreenEnum.LIVE_TRANSLATE_VIEW:
-                 return <LiveTranslateView onBack={handleBackToDashboard} onTranslate={handleTranslate} checkAccess={checkAccess} />;
             case AppScreenEnum.CHATBOT_BUILDER_VIEW:
-                return <ChatbotBuilderView onBack={handleBackToDashboard} onSave={handleSaveChatbot} isProcessing={isProcessing} />;
+                return <ChatbotBuilderView onSave={handleSaveChatbot} isProcessing={isProcessing} onBack={handleBackToDashboard} />;
             case AppScreenEnum.PROFILE_VIEW:
                 return currentUser ? <ProfileView user={currentUser} onBack={handleBackToDashboard} onUserUpdate={handleUserUpdate} /> : <LoginScreen onLogin={handleLogin} />;
-             case AppScreenEnum.BACKEND_OFFLINE:
-                return <BackendOfflineView />;
             case AppScreenEnum.CHECKING_BACKEND:
+                return <div className="flex items-center justify-center h-screen"><Loader message="Connecting to server..." /></div>;
+            case AppScreenEnum.BACKEND_OFFLINE:
+                return <BackendOfflineView />;
             default:
-                return <div className="flex items-center justify-center h-full"><Loader message="Connecting to server..." /></div>;
+                return <LoginScreen onLogin={handleLogin} />;
         }
     };
+    
+    const showHeader = screen !== AppScreenEnum.LOGIN && 
+                       screen !== AppScreenEnum.CHECKING_BACKEND &&
+                       screen !== AppScreenEnum.BACKEND_OFFLINE;
+
 
     return (
-        <div className="min-h-screen flex flex-col bg-gray-900">
-            <header className="w-full p-4 flex justify-between items-center glass-card border-b border-white/10 sticky top-0 z-10">
-                <div className="flex items-center gap-4">
-                    <AjoAiLogo className="h-10 w-auto" />
-                    <h1 className="text-xl font-bold text-white hidden md:block">
-                        Scribe
-                    </h1>
-                </div>
-                 <div className="flex items-center gap-4">
-                    <button
-                        onClick={() => setIsAboutModalOpen(true)}
-                        className="p-2 text-gray-300 hover:text-white transition-colors rounded-full hover:bg-white/10"
-                        title="About Ajo AI Scribe"
-                    >
-                        <InfoIcon className="w-6 h-6" />
-                    </button>
-                    {currentUser && <UserMenu user={currentUser} onLogout={handleLogout} onNavigateProfile={handleNavigateToProfile} />}
-                </div>
-            </header>
-            <main className="flex-grow flex items-center justify-center p-4">
+        <div className={`min-h-screen flex flex-col ${screen === AppScreenEnum.LOGIN || screen === AppScreenEnum.BACKEND_OFFLINE ? 'items-center justify-center' : ''}`}>
+           {showHeader && currentUser && (
+                <header className="w-full flex-shrink-0 bg-black/10 backdrop-blur-lg border-b border-white/10 z-10 sticky top-0">
+                    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                        <div className="flex items-center justify-between h-16">
+                             <div className="flex items-center gap-4">
+                               <AjoAiLogo className="h-10 w-auto" />
+                               
+                            </div>
+                            <div className="flex items-center gap-2">
+                               <button 
+                                  onClick={() => setIsAboutModalOpen(true)}
+                                  className="p-2 text-gray-300 hover:text-white transition-colors rounded-md hover:bg-white/10"
+                                  title="About this application"
+                                >
+                                  <InfoIcon className="w-5 h-5"/>
+                               </button>
+                               <UserMenu user={currentUser} onLogout={handleLogout} onNavigateProfile={handleNavigateToProfile} />
+                            </div>
+                        </div>
+                    </div>
+                </header>
+            )}
+
+            <main className={`flex-grow w-full flex ${isProcessing || screen === AppScreenEnum.LOGIN ? 'items-center justify-center' : ''}`}>
                 {renderScreen()}
             </main>
+
             <AboutModal isOpen={isAboutModalOpen} onClose={() => setIsAboutModalOpen(false)} />
         </div>
     );
