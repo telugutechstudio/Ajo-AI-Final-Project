@@ -116,8 +116,15 @@ mongoose.connect(MONGODB_URI)
 
 // --- API Routes ---
 app.get('/api/status', (req, res) => {
-    res.status(200).json({ status: 'online', message: 'Ajo AI Backend Server is running!' });
+    const dbState = mongoose.connection.readyState;
+    // 0: disconnected, 1: connected, 2: connecting, 3: disconnecting
+    if (dbState === 1) {
+        res.status(200).json({ status: 'online', message: 'Ajo AI Backend is running!', db: 'connected' });
+    } else {
+        res.status(503).json({ status: 'offline', message: 'Backend is running but database is not connected.', db: mongoose.Connection.STATES[dbState] });
+    }
 });
+
 
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/files', require('./routes/files'));
