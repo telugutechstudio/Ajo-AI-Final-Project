@@ -14,32 +14,17 @@ const BackendOfflineView: React.FC = () => {
                 <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-red-500/20 flex items-center justify-center">
                     <XIcon className="w-8 h-8 text-red-300" />
                 </div>
-                <h1 className="text-3xl font-bold text-white mb-3">Server Connection Error</h1>
+                <h1 className="text-3xl font-bold text-white mb-3">Service Unavailable</h1>
                 <p className="text-gray-300 mb-6">
-                    The application could not connect to its backend server. This usually means the server process is not running on your computer.
+                    We're sorry, but the Ajo AI service is temporarily unavailable. This might be due to server maintenance or a connection issue.
                 </p>
 
                 <div className="text-left bg-black/30 p-4 rounded-lg border border-white/10">
-                    <h2 className="font-semibold text-lg text-white mb-3">How to Fix This:</h2>
-                    <p className="text-gray-300 mb-4">Please start the backend server by following these steps in your project folder:</p>
-                    <div className="space-y-3">
-                        <div>
-                            <p className="text-sm text-gray-400">1. Open a new terminal or command prompt.</p>
-                        </div>
-                        <div>
-                            <p className="text-sm text-gray-400">2. Navigate into the `backend` directory:</p>
-                            <code className="block bg-gray-900 p-2 rounded-md mt-1 text-yellow-300 text-sm">cd backend</code>
-                        </div>
-                         <div>
-                            <p className="text-sm text-gray-400">3. (First time only) Install required packages:</p>
-                            <code className="block bg-gray-900 p-2 rounded-md mt-1 text-yellow-300 text-sm">npm install</code>
-                        </div>
-                        <div>
-                            <p className="text-sm text-gray-400">4. Start the server:</p>
-                            <code className="block bg-gray-900 p-2 rounded-md mt-1 text-yellow-300 text-sm">npm run dev</code>
-                        </div>
-                    </div>
-                     <p className="text-xs text-gray-400 mt-4">Leave the terminal window running. Once the server starts, you can refresh this page.</p>
+                    <h2 className="font-semibold text-lg text-white mb-3">What you can do:</h2>
+                     <ul className="list-disc list-inside text-gray-300 space-y-2">
+                        <li>Please try refreshing the page in a few moments.</li>
+                        <li>If the problem persists, please check back later.</li>
+                    </ul>
                 </div>
                 
                 <button
