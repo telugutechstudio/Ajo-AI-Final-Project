@@ -35,14 +35,37 @@ if (!process.env.MONGODB_URI || !process.env.JWT_SECRET || !process.env.API_KEY)
     process.exit(1);
 }
 
+// --- NEW: CORS Startup Check ---
+if (!process.env.CORS_ORIGIN) {
+    console.warn("\n\n\x1b[33m--- CORS WARNING ---\x1b[0m");
+    console.warn("\x1b[33m'CORS_ORIGIN' environment variable is not set.\x1b[0m");
+    console.warn("The backend will default to allowing requests from the known Vercel URL, but it's recommended to set this variable explicitly in your hosting environment (e.g., Render) for production.");
+    console.warn("Set \x1b[32mCORS_ORIGIN\x1b[0m to your frontend's full URL, for example: \x1b[36mhttps://ajo-ai-final-project.vercel.app\x1b[0m\n");
+}
+
 
 // Initialize the Express app
 const app = express();
 
 // Middleware
+const allowedOrigins = [
+    'http://localhost:5173', // Local dev environment
+    'https://ajo-ai-final-project.vercel.app', // Production frontend
+    /https:\/\/[a-zA-Z0-9-]+-telugutechstudio\.vercel\.app/ // Regex for Vercel preview deployments
+];
+
+if (process.env.CORS_ORIGIN) {
+    allowedOrigins.push(process.env.CORS_ORIGIN);
+}
+
+console.log('CORS Whitelist:', allowedOrigins);
+
 const corsOptions = {
-    origin: process.env.CORS_ORIGIN || 'http://localhost:5173',
+    origin: allowedOrigins,
+    credentials: true,
+    optionsSuccessStatus: 200,
 };
+
 app.use(cors(corsOptions));
 app.use(express.json({ limit: '50mb' })); // To parse JSON bodies, increased limit for results
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
