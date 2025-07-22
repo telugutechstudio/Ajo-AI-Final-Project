@@ -94,7 +94,7 @@ const getApiEndpointForTool = (tool: Tool): string => {
 
 const App: React.FC = () => {
     const [state, dispatch] = useReducer(appReducer, initialState);
-    const { currentUser, screen, backendStatus, activeTool, isProcessing, loadingMessage, currentFile, error } = state;
+    const { currentUser, screen, backendStatus, activeTool, isProcessing, loadingMessage, loadingSubMessage, currentFile, error } = state;
 
     // Local state for UI components that don't affect core app logic
     const [isAboutModalOpen, setIsAboutModalOpen] = useState(false);
@@ -106,9 +106,16 @@ const App: React.FC = () => {
     
     // --- App Initialization & Auth ---
     useEffect(() => {
-        const checkBackendStatusWithRetry = async (maxRetries = 5, delay = 5000) => {
+        const checkBackendStatusWithRetry = async (maxRetries = 18, delay = 5000) => {
+            dispatch({ type: 'SET_LOADING_SUB_MESSAGE', payload: null });
             for (let attempt = 1; attempt <= maxRetries; attempt++) {
                 try {
+                    dispatch({ type: 'SET_LOADING_MESSAGE', payload: `Connecting to server... (Attempt ${attempt} of ${maxRetries})` });
+
+                    if (attempt === 4) { // After 3 failed attempts (15s), show an explanation
+                        dispatch({ type: 'SET_LOADING_SUB_MESSAGE', payload: 'Our free-tier server may be waking up. This can take up to a minute. Thanks for your patience!' });
+                    }
+
                     const response = await fetch('/api/status');
                     if (response.ok) {
                         const user = authService.getCurrentUser();
@@ -116,6 +123,7 @@ const App: React.FC = () => {
                             type: 'SET_BACKEND_STATUS', 
                             payload: { status: 'online', screen: user ? (user.subscriptionRequest ? AppScreenEnum.UPGRADE_PENDING_VIEW : AppScreenEnum.DASHBOARD) : AppScreenEnum.LOGIN, user }
                         });
+                        dispatch({ type: 'SET_LOADING_SUB_MESSAGE', payload: null });
                         return; // Success, exit function
                     }
                     console.warn(`Backend check attempt ${attempt} returned status: ${response.status}`);
@@ -443,7 +451,7 @@ const App: React.FC = () => {
 
     const renderScreen = () => {
         if (isProcessing) {
-            return <Loader message={loadingMessage} />;
+            return <Loader message={loadingMessage} subMessage={loadingSubMessage} />;
         }
 
         switch (screen) {
@@ -539,7 +547,7 @@ const App: React.FC = () => {
             case AppScreenEnum.PROFILE_VIEW:
                 return currentUser ? <ProfileView user={currentUser} onBack={handleBackToDashboard} onUserUpdate={handleUserUpdate} /> : <LoginScreen onLogin={handleLogin} />;
             case AppScreenEnum.CHECKING_BACKEND:
-                return <div className="flex items-center justify-center h-screen"><Loader message="Connecting to server..." /></div>;
+                return <div className="flex items-center justify-center h-screen"><Loader message={loadingMessage} subMessage={loadingSubMessage} /></div>;
             case AppScreenEnum.BACKEND_OFFLINE:
                 return <BackendOfflineView />;
             default:
