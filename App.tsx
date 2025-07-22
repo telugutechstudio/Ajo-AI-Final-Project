@@ -1,5 +1,5 @@
 
-import React, { useState, useCallback, useRef, useEffect, useReducer } from 'react';
+import React, { useState, useCallback, useRef, useEffect, useReducer, lazy, Suspense } from 'react';
 import FileUpload from './components/FileUpload';
 import TranscriptionView from './components/TranscriptionView';
 import OcrResultView from './components/OcrResultView';
@@ -28,7 +28,8 @@ import { AjoAiLogo } from './components/Logo';
 import ProfileView from './components/ProfileView';
 import BackendOfflineView from './components/BackendOfflineView';
 import { appReducer, initialState } from './state';
-import LiveRecordingView from './components/LiveRecordingView';
+
+const LiveRecordingView = lazy(() => import('./components/LiveRecordingView'));
 
 
 const UserMenu: React.FC<{ user: User; onLogout: () => void; onNavigateProfile: () => void; }> = ({ user, onLogout, onNavigateProfile }) => {
@@ -478,21 +479,25 @@ const App: React.FC = () => {
                     error={error}
                 />;
             case AppScreenEnum.LIVE_RECORDING:
-                return <LiveRecordingView
-                    onBack={handleBackToDashboard}
-                    onComplete={(file) => {
-                        handleProcessFiles(
-                            [{ id: file.name, file: file }], 
-                            { 
-                                language: 'English', 
-                                mode: TranscriptionMode.DOLPHIN, 
-                                enableSpeakerRecognition: true, 
-                                enableAudioRestoration: false,
-                            }, 
-                            'LIVE_SCRIBE'
-                        );
-                    }}
-                />;
+                return (
+                    <Suspense fallback={<Loader message="Loading Live Recorder..." subMessage="Please wait a moment." />}>
+                        <LiveRecordingView
+                            onBack={handleBackToDashboard}
+                            onComplete={(file) => {
+                                handleProcessFiles(
+                                    [{ id: file.name, file: file }], 
+                                    { 
+                                        language: 'English', 
+                                        mode: TranscriptionMode.DOLPHIN, 
+                                        enableSpeakerRecognition: true, 
+                                        enableAudioRestoration: false,
+                                    }, 
+                                    'LIVE_SCRIBE'
+                                );
+                            }}
+                        />
+                    </Suspense>
+                );
             case AppScreenEnum.TRANSCRIPTION:
                 return currentFile && 'segments' in currentFile.result ? <TranscriptionView 
                     transcript={currentFile.result} 
